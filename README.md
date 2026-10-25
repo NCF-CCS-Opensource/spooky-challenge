@@ -19,6 +19,10 @@ Open <http://localhost:3000>. Compose checks the API at `/health` on its interna
 
 `pnpm dev` runs the Next.js and NestJS development servers through Turborepo when PostgreSQL and Piston are already available. The API installs the pinned Python runtime (`PISTON_PYTHON_VERSION`, default `3.12.0`) into Piston before it becomes healthy. Stop Compose services with `pnpm dev:down`. Add `-v` to `docker compose down` only when you want to delete the local database and Piston package data.
 
+## One container
+
+`pnpm start` (no `pnpm install` needed; just Docker) builds a single image holding Piston, PostgreSQL, the API and the web app, and serves it at <http://localhost:3000>. Data persists in the `toc-pg` and `toc-piston` volumes; set `POSTGRES_PASSWORD` with `-e` if you change it from the default. Internal services listen on 127.0.0.1 only. The first start takes a minute while Piston installs Python.
+
 ## Piston network boundary
 
 Piston publishes no host port. It is attached only to the internal `runner` network, shared with the API. The web container cannot reach it; browser code and Next.js do not call Piston. The API uses `PISTON_URL=http://piston:2000` for runner requests. PostgreSQL is on its own internal network with the API.
