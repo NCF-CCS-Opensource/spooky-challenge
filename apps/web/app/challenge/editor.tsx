@@ -100,6 +100,12 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
     output_limit_exceeded: 'Output limit exceeded.',
     wrong_answer: 'Not quite. Review your code and try again.',
   };
+  function resultHeading(value: Result) {
+    if (value.error) return errorText[value.error] ?? value.error;
+    if (value.status === 'accepted') return `Challenge ${number} solved!`;
+    if (value.status === 'wrong_answer') return errorText.wrong_answer;
+    return 'Program output';
+  }
 
   return <>
     <section className="workbench" aria-label="Python code editor" aria-busy={mode === 'loading' || busy}>
@@ -112,10 +118,10 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
         <button type="button" onClick={() => submit('check')} disabled={busy || mode !== 'active'}>Check Solution</button>
         {mode === 'active' && <button type="button" className="end-button" onClick={() => endVisit(visit)} disabled={busy}>End challenge</button>}
       </div>
-      {mode === 'ended' && result?.status !== 'accepted' && <p role="status">This visit has ended. Open the challenge again to start a new visit.</p>}
+      {mode === 'ended' && result?.status !== 'accepted' && <output className="visit-status">This visit has ended. Open the challenge again to start a new visit.</output>}
       {error && <p role="alert">{error}</p>}
       {result && <section className="result" aria-live="polite">
-        <h2>{result.error ? (errorText[result.error] ?? result.error) : result.status === 'accepted' ? `Challenge ${number} solved!` : result.status === 'wrong_answer' ? errorText.wrong_answer : 'Program output'}</h2>
+        <h2>{resultHeading(result)}</h2>
         {result.status === 'accepted' && <p>You’re eligible to receive candy from an organizer.</p>}
         {result.status && ['accepted', 'wrong_answer'].includes(result.status) ? <p>{result.passed} of {result.total} tests passed.</p> : null}
         {result.output !== undefined && <pre>{result.output || '(no output)'}</pre>}
