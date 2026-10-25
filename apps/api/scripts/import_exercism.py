@@ -76,6 +76,21 @@ class PendingCall:
 BUILTINS = {"zip": zip, "enumerate": enumerate, "list": list}
 
 
+def call(node, scope, functions):
+    args = []
+    for arg in node.args:
+        if isinstance(arg, ast.Starred):
+            args.extend(value(arg.value, scope, functions))
+        else:
+            args.append(value(arg, scope, functions))
+    kwargs = {kw.arg: value(kw.value, scope, functions) for kw in node.keywords}
+    if node.func.id in functions and not kwargs:
+        return PendingCall(node.func.id, args)
+    if node.func.id in BUILTINS and None not in kwargs:
+        return list(BUILTINS[node.func.id](*args, **kwargs))
+    raise Unsupported(node.func.id)
+
+
 def value(node, scope, functions):
     """Evaluate literals, scope names, zip/enumerate/list, and record calls to the exercise's functions."""
     if isinstance(node, ast.Name):
@@ -83,18 +98,7 @@ def value(node, scope, functions):
             return scope[node.id]
         raise Unsupported(node.id)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        args = []
-        for arg in node.args:
-            if isinstance(arg, ast.Starred):
-                args.extend(value(arg.value, scope, functions))
-            else:
-                args.append(value(arg, scope, functions))
-        kwargs = {kw.arg: value(kw.value, scope, functions) for kw in node.keywords}
-        if node.func.id in functions and not kwargs:
-            return PendingCall(node.func.id, args)
-        if node.func.id in BUILTINS and None not in kwargs:
-            return list(BUILTINS[node.func.id](*args, **kwargs))
-        raise Unsupported(node.func.id)
+        return call(node, scope, functions)
     if isinstance(node, (ast.List, ast.Tuple)):
         items = [value(item, scope, functions) for item in node.elts]
         return items if isinstance(node, ast.List) else tuple(items)
@@ -127,6 +131,32 @@ VALUE_ASSERTS = {"assertEqual", "assertIs", "assertTrue", "assertFalse", "assert
                  "assertCountEqual", "assertAlmostEqual", "assertIn", "assertNotEqual", "assertListEqual"}
 
 
+def assertion(call_node, scope, functions, cases):
+    method, args = call_node.func.attr, call_node.args
+    if method in ("assertEqual", "assertIs") and len(args) >= 2:
+        actual, expected = value(args[0], scope, functions), value(args[1], scope, functions)
+    elif method in ("assertTrue", "assertFalse") and args:
+        actual, expected = value(args[0], scope, functions), method == "assertTrue"
+    else:
+        raise Unsupported(method)
+    if isinstance(expected, PendingCall):
+        actual, expected = expected, actual  # assertEqual(expected, func(x)) ordering
+    if not isinstance(actual, PendingCall) or not stable(expected):
+        raise Unsupported("assertion shape")
+    stdin = f"{actual.name}({', '.join(repr(arg) for arg in actual.args)})"
+    cases.append({"stdin": stdin, "expected_output": repr(expected)})
+
+
+def expects_error(node):
+    return any(isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute)
+               and item.context_expr.func.attr == "assertRaises" for item in node.items)
+
+
+def is_value_assert(node):
+    return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in VALUE_ASSERTS)
+
+
 def run(statements, scope, functions, cases):
     """Walk a test body, appending one case per assertion. Raises Unsupported on anything else."""
     for node in statements:
@@ -143,25 +173,11 @@ def run(statements, scope, functions, cases):
                 bind(node.target, item, inner)
                 run(node.body, inner, functions, cases)
         elif isinstance(node, ast.With):
-            if any(isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute)
-                   and item.context_expr.func.attr == "assertRaises" for item in node.items):
+            if expects_error(node):
                 raise ExpectsError()
             run(node.body, scope, functions, cases)
-        elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-              and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in VALUE_ASSERTS):
-            method, args = node.value.func.attr, node.value.args
-            if method in ("assertEqual", "assertIs") and len(args) >= 2:
-                actual, expected = value(args[0], scope, functions), value(args[1], scope, functions)
-            elif method in ("assertTrue", "assertFalse") and args:
-                actual, expected = value(args[0], scope, functions), method == "assertTrue"
-            else:
-                raise Unsupported(method)
-            if isinstance(expected, PendingCall):
-                actual, expected = expected, actual  # assertEqual(expected, func(x)) ordering
-            if not isinstance(actual, PendingCall) or not stable(expected):
-                raise Unsupported("assertion shape")
-            stdin = f"{actual.name}({', '.join(repr(arg) for arg in actual.args)})"
-            cases.append({"stdin": stdin, "expected_output": repr(expected)})
+        elif is_value_assert(node):
+            assertion(node.value, scope, functions, cases)
 
 
 def convert_tests(source, functions):

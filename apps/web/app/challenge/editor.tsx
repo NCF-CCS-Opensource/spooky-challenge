@@ -12,7 +12,7 @@ const usernameKey = 'treat-or-code-learner';
 function normalizeUsername(value: string) { return value.trim().normalize('NFKC').toLowerCase(); }
 function validUsername(value: string) { return value.length >= 1 && value.length <= 40 && !/[\p{Cc}\p{Cf}]/u.test(value) && /^[\p{L}\p{N} _-]+$/u.test(value); }
 
-export default function Editor({ number, pythonVersion, starterCode, examples }: { number: number; pythonVersion: string; starterCode: string; examples: Array<{ input?: string }> }) {
+export default function Editor({ number, pythonVersion, starterCode, examples }: Readonly<{ number: number; pythonVersion: string; starterCode: string; examples: Array<{ input?: string }> }>) {
   const [code, setCode] = useState(starterCode);
   const [stdin, setStdin] = useState(examples[0]?.input ?? '');
   const [result, setResult] = useState<Result | null>(null);
@@ -29,7 +29,7 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
     if (!active) { setMode('username'); return; }
     try {
       const current: Visit = JSON.parse(active);
-      if (!current.visitId || !current.learnerUsername || !Number.isInteger(current.number)) throw new Error();
+      if (!current.visitId || !current.learnerUsername || !Number.isInteger(current.number)) throw new Error("Invalid saved visit");
       setVisit(current);
       setMode(current.number === number ? 'active' : 'conflict');
     } catch {
@@ -127,19 +127,19 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
         {result.output !== undefined && <pre>{result.output || '(no output)'}</pre>}
       </section>}
     </section>
-    {mode === 'username' && <div className="modal-backdrop"><section className="visit-modal" role="dialog" aria-modal="true" aria-labelledby="username-title">
+    {mode === 'username' && <div className="modal-backdrop"><dialog open className="visit-modal" aria-modal="true" aria-labelledby="username-title">
       <h2 id="username-title">Choose a pseudonym</h2>
       <p>Choose a unique pseudonym. Do not enter your real name or email.</p>
       <label htmlFor="pseudonym">Your pseudonym</label>
       <input id="pseudonym" className="pseudonym" value={username} onChange={(event) => setUsername(event.target.value)} maxLength={80} autoComplete="off" autoFocus />
       {error && <p role="alert">{error}</p>}
       <button type="button" onClick={startVisit} disabled={busy}>{busy ? 'Opening…' : 'Start challenge'}</button>
-    </section></div>}
-    {mode === 'conflict' && <div className="modal-backdrop"><section className="visit-modal" role="dialog" aria-modal="true" aria-labelledby="active-title">
+    </dialog></div>}
+    {mode === 'conflict' && <div className="modal-backdrop"><dialog open className="visit-modal" aria-modal="true" aria-labelledby="active-title">
       <h2 id="active-title">A challenge visit is active</h2>
       <p>End challenge {visit?.number} before opening this challenge.</p>
       {error && <p role="alert">{error}</p>}
       <button type="button" onClick={() => endVisit(visit)} disabled={busy}>{busy ? 'Ending…' : 'End current visit and continue'}</button>
-    </section></div>}
+    </dialog></div>}
   </>;
 }

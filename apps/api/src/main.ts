@@ -76,20 +76,7 @@ class ChallengeService {
   }
 
   async execute(printedNumber: number, body: unknown, judged: boolean) {
-    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('Invalid request');
-    const request = body as Record<string, unknown>;
-    if (request.language !== 'python' || request.version !== pythonVersion) {
-      throw new BadRequestException('Only the configured Python runtime is supported');
-    }
-    const { visitId, learnerUsername } = this.visitRequest(request);
-    if (typeof request.code !== 'string' || Buffer.byteLength(request.code, 'utf8') > maxCodeBytes) {
-      throw new BadRequestException('Code must be a string of at most 32000 bytes');
-    }
-    if (typeof request.stdin !== 'string' || Buffer.byteLength(request.stdin, 'utf8') > maxInputBytes) {
-      throw new BadRequestException('Input must be a string of at most 8000 bytes');
-    }
-    const code = request.code;
-    const stdin = request.stdin;
+    const { visitId, learnerUsername, code, stdin } = this.executeRequest(body);
 
     return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async (client) => {
     const challenge = await client.query(
@@ -121,12 +108,12 @@ class ChallengeService {
     const limit = Math.min(3000, Math.max(100, Number(challenge.rows[0].judge_config?.time_limit_ms) || 2000));
     const results: ExecutionResult[] = [];
     for (const test of cases) {
-      const result = await this.run(code, test.stdin, limit);
+      const result = await this.run(code, test.stdin, limit); // NOSONAR: tests must run sequentially and stop at the first runner error
       if (result.error) {
         await this.record(client, printedNumber, result);
         if (judged) await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', false, {
-          attempt_order: attemptOrder, elapsed_ms: Date.now() - started, failed_test_count: 1, error_category: result.error,
-        }, 2);
+          metadata: { attempt_order: attemptOrder, elapsed_ms: Date.now() - started, failed_test_count: 1, error_category: result.error }, eventVersion: 2,
+        });
         else await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
         return judged
           ? { status: 'error', error: result.error }
@@ -146,8 +133,8 @@ class ChallengeService {
     const elapsedMs = Date.now() - started;
     await this.record(client, printedNumber, { version: pythonVersion, durationMs: results.reduce((sum, r) => sum + r.durationMs, 0), exitStatus: 0, error: category });
     await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', passed === cases.length, {
-      attempt_order: attemptOrder, elapsed_ms: elapsedMs, failed_test_count: cases.length - passed, error_category: category,
-    }, 2);
+      metadata: { attempt_order: attemptOrder, elapsed_ms: elapsedMs, failed_test_count: cases.length - passed, error_category: category }, eventVersion: 2,
+    });
     if (passed === cases.length) {
       await client.query(
         `INSERT INTO learning_interactions
@@ -161,6 +148,23 @@ class ChallengeService {
     }
     return { status: category, passed, total: cases.length };
     });
+  }
+
+  private executeRequest(body: unknown) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('Invalid request');
+    const request = body as Record<string, unknown>;
+    if (request.language !== 'python' || request.version !== pythonVersion) {
+      throw new BadRequestException('Only the configured Python runtime is supported');
+    }
+    const { visitId, learnerUsername } = this.visitRequest(request);
+    if (typeof request.code !== 'string' || Buffer.byteLength(request.code, 'utf8') > maxCodeBytes) {
+      throw new BadRequestException('Code must be a string of at most 32000 bytes');
+    }
+    if (typeof request.stdin !== 'string' || Buffer.byteLength(request.stdin, 'utf8') > maxInputBytes) {
+      throw new BadRequestException('Input must be a string of at most 8000 bytes');
+    }
+    return { visitId, learnerUsername, code: request.code, stdin: request.stdin };
+
   }
 
   private async withLocks<T>(keys: string[], action: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -182,7 +186,7 @@ class ChallengeService {
     }
   }
 
-  private recordInteraction(client: PoolClient, number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null, metadata = {}, eventVersion = 1) {
+  private recordInteraction(client: PoolClient, number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null, { metadata = {}, eventVersion = 1 } = {}) {
     return client.query(
       `INSERT INTO learning_interactions
        (visit_id, learner_username, challenge_id, event_type, content_version, language,
@@ -355,6 +359,6 @@ async function readBounded(response: Response, maxBytes: number): Promise<string
   return new TextDecoder().decode(bytes);
 }
 
-function normalize(value: string) { return value.replace(/\r\n/g, '\n').trimEnd(); }
+function normalize(value: string) { return value.replaceAll('\r\n', '\n').trimEnd(); }
 
 void bootstrap();
