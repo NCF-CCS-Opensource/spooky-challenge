@@ -9,3 +9,4 @@ coverage
 data/
 *.log
 *.tsbuildinfo
+__pycache__/
