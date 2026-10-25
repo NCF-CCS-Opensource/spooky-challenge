@@ -47,8 +47,9 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(len({r["split"] for r in bkt}), 1)
 
     def test_weak_key_rejected(self):
+        out = tempfile.mkdtemp()
         with self.assertRaises(SystemExit):
-            export([], "short", tempfile.mkdtemp())
+            export([], "short", out)
 
 
 if __name__ == "__main__":

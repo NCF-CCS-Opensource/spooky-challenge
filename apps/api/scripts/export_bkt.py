@@ -45,6 +45,23 @@ def load(lines):
     return events
 
 
+def count_judged(e, quality, seen):
+    """Return (keep, attempt) for a submission_result, updating quality counts."""
+    metadata = e.get("metadata") or {}
+    attempt = metadata.get("attempt_order")  # absent on event_version 1
+    if metadata.get("error_category") == "runner_unavailable":
+        quality["runner_unavailable_excluded"] += 1  # infrastructure failure says nothing about the skill
+        return False, attempt
+    quality["missing_attempt_order"] += attempt is None
+    quality["missing_language"] += e.get("language") is None
+    identity = (e["visit_id"], attempt) if attempt is not None else e["id"]
+    if identity in seen:
+        quality["duplicate_events"] += 1
+        return False, attempt
+    seen.add(identity)
+    return True, attempt
+
+
 def build(events, key):
     """Return (bkt_rows, visit_rows, quality) from time-ordered events."""
     quality = {"duplicate_events": 0, "visits_with_multiple_skills": 0, "missing_attempt_order": 0, "missing_language": 0, "runner_unavailable_excluded": 0}
@@ -62,18 +79,9 @@ def build(events, key):
             visit["outcome"] = OUTCOMES[e["event_type"]]
         if e["event_type"] != "submission_result":
             continue
-        attempt = (e.get("metadata") or {}).get("attempt_order")  # absent on event_version 1
-        if (e.get("metadata") or {}).get("error_category") == "runner_unavailable":
-            quality["runner_unavailable_excluded"] += 1  # infrastructure failure says nothing about the skill
-            continue
-        quality["missing_attempt_order"] += attempt is None
-        quality["missing_language"] += e.get("language") is None
-        identity = (e["visit_id"], attempt) if attempt is not None else e["id"]
-        if identity in seen:
-            quality["duplicate_events"] += 1
-            continue
-        seen.add(identity)
-        judged.append((visit, e, attempt))
+        keep, attempt = count_judged(e, quality, seen)
+        if keep:
+            judged.append((visit, e, attempt))
     quality["visits_with_multiple_skills"] = sum(len(s) > 1 for s in skills_by_visit.values())
 
     order, bkt = Counter(), []
@@ -197,13 +205,21 @@ def export(lines, key, out):
     return bkt, visits, quality
 
 
+def inside_cwd(path):
+    """Resolve a CLI path and refuse anything outside the working directory."""
+    resolved = Path(path).resolve()
+    if not resolved.is_relative_to(Path.cwd().resolve()):
+        raise SystemExit(f"{path} is outside the working directory")
+    return resolved
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("jsonl", help="row_to_json dump of learning_interactions")
     parser.add_argument("--out", default="export")
     args = parser.parse_args()
-    with open(args.jsonl) as f:
-        export(f, os.environ.get("EXPORT_HMAC_KEY", ""), args.out)
+    with open(inside_cwd(args.jsonl)) as f:
+        export(f, os.environ.get("EXPORT_HMAC_KEY", ""), inside_cwd(args.out))
 
 
 if __name__ == "__main__":
