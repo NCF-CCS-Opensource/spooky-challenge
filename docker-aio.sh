@@ -11,10 +11,11 @@ export PATH=/opt/node22/bin:$PATH
 
 mkdir -p $PGDATA && chown -R postgres:postgres /var/lib/postgresql
 if [ ! -s $PGDATA/PG_VERSION ]; then
-  su postgres -c "$PG/initdb -D $PGDATA"
+  su postgres -c "$PG/initdb -E UTF8 --locale=C.UTF-8 -D $PGDATA"
   su postgres -c "$PG/pg_ctl -D $PGDATA -w start"
   su postgres -c "psql -c \"CREATE ROLE $U LOGIN PASSWORD '$PW'\" -c \"CREATE DATABASE $DB OWNER $U\""
-  su postgres -c "psql -d $DB -f /app/apps/api/db/init.sql"
+  su postgres -c "psql -U $U -d $DB -f /app/apps/api/db/init.sql"
+  su postgres -c "psql -v ON_ERROR_STOP=1 -U $U -d $DB -f /app/apps/api/db/seed.sql"
   su postgres -c "$PG/pg_ctl -D $PGDATA -w stop"
 fi
 su postgres -c "$PG/postgres -D $PGDATA -c listen_addresses=127.0.0.1" &
