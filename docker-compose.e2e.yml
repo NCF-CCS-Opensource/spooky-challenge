@@ -1,0 +1,8 @@
+# Test-only overlay: publishes the API and database on loopback for apps/api/e2e. Never use on the booth computer.
+# The data/runner networks are internal (no host port mapping), so e2e puts the API and database on a plain network too.
+services:
+  api:
+    ports: ["127.0.0.1:3001:3001"]
+  db:
+    ports: ["127.0.0.1:55432:5432"]
+    networks: [data, app]

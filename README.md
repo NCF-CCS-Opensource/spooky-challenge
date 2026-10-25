@@ -37,3 +37,7 @@ python3 -m unittest discover apps/api/scripts   # run the export tests
 ```
 
 `interactions.jsonl` contains raw usernames: keep it out of git and delete it after exporting. The output folder holds the BKT rows, separate visit outcome labels, a manifest with schema version, a data dictionary and a report. Usernames are self-reported, so impersonation or collisions can merge learners.
+
+## Event day
+
+See [docs/runbook.md](docs/runbook.md) for setup, smoke test, recovery, export and reset, and how to run the end-to-end tests (`pnpm --filter api test:e2e`).
