@@ -49,19 +49,21 @@ class ChallengeService {
 
   async openVisit(printedNumber: number, body: unknown) {
     const { visitId, learnerUsername } = this.visitRequest(body);
-    const challenge = await this.db.pool.query('SELECT 1 FROM challenges WHERE printed_number = $1', [printedNumber]);
-    if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
-    const solved = await this.db.pool.query(
-      "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1", [printedNumber],
-    );
-    if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
-    await this.recordInteraction(printedNumber, visitId, learnerUsername, 'challenge_opened', null);
-    return { visitId, learnerUsername };
+    return this.withLocks([`challenge:${printedNumber}`], async () => {
+      const challenge = await this.db.pool.query('SELECT 1 FROM challenges WHERE printed_number = $1', [printedNumber]);
+      if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
+      const solved = await this.db.pool.query(
+        "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1", [printedNumber],
+      );
+      if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
+      await this.recordInteraction(printedNumber, visitId, learnerUsername, 'challenge_opened', null);
+      return { visitId, learnerUsername };
+    });
   }
 
   async endVisit(printedNumber: number, body: unknown) {
     const { visitId, learnerUsername } = this.visitRequest(body);
-    return this.withVisitLock(visitId, async () => {
+    return this.withLocks([`visit:${visitId}`], async () => {
       const ended = await this.db.pool.query(
         "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id = $2 AND learner_username = $3 AND event_type = 'gave_up' LIMIT 1",
         [visitId, printedNumber, learnerUsername],
@@ -89,7 +91,7 @@ class ChallengeService {
     const code = request.code;
     const stdin = request.stdin;
 
-    return this.withVisitLock(visitId, async () => {
+    return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async () => {
     const challenge = await this.db.pool.query(
       'SELECT hidden_tests, judge_config FROM challenges WHERE printed_number = $1', [printedNumber],
     );
@@ -161,13 +163,13 @@ class ChallengeService {
     });
   }
 
-  private async withVisitLock<T>(visitId: string, action: () => Promise<T>): Promise<T> {
+  private async withLocks<T>(keys: string[], action: () => Promise<T>): Promise<T> {
     const client = await this.db.pool.connect();
     let transaction = false;
     try {
       await client.query('BEGIN');
       transaction = true;
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [visitId]);
+      for (const key of keys) await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
       const result = await action();
       await client.query('COMMIT');
       transaction = false;
