@@ -36,12 +36,32 @@ class ChallengeService {
   async findByNumber(printedNumber: number) {
     const result = await this.db.pool.query(
       `SELECT printed_number, title, description, difficulty, assessed_skill_id,
-              starter_code, examples, hints, content_version
+              starter_code, examples, hints, content_version,
+              EXISTS (SELECT 1 FROM learning_interactions i WHERE i.challenge_id = challenges.printed_number AND i.event_type = 'challenge_solved') AS solved
        FROM challenges WHERE printed_number = $1`,
       [printedNumber],
     );
     if (!result.rowCount) throw new NotFoundException('Challenge not found');
     return { ...result.rows[0], python_version: pythonVersion };
+  }
+
+  async openVisit(printedNumber: number, body: unknown) {
+    const { visitId, learnerUsername } = this.visitRequest(body);
+    const challenge = await this.db.pool.query('SELECT 1 FROM challenges WHERE printed_number = $1', [printedNumber]);
+    if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
+    const solved = await this.db.pool.query(
+      "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1", [printedNumber],
+    );
+    if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
+    await this.recordInteraction(printedNumber, visitId, learnerUsername, 'challenge_opened', null);
+    return { visitId, learnerUsername };
+  }
+
+  async endVisit(printedNumber: number, body: unknown) {
+    const { visitId, learnerUsername } = this.visitRequest(body);
+    await this.assertActiveVisit(printedNumber, visitId, learnerUsername);
+    await this.recordInteraction(printedNumber, visitId, learnerUsername, 'gave_up', null);
+    return { ended: true };
   }
 
   async execute(printedNumber: number, body: unknown, judged: boolean) {
@@ -50,10 +70,7 @@ class ChallengeService {
     if (request.language !== 'python' || request.version !== pythonVersion) {
       throw new BadRequestException('Only the configured Python runtime is supported');
     }
-    if (typeof request.visitId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.visitId)
-      || typeof request.learnerUsername !== 'string' || !/^[a-z0-9_-]{3,32}$/.test(request.learnerUsername)) {
-      throw new BadRequestException('A visit ID and learner pseudonym are required');
-    }
+    const { visitId, learnerUsername } = this.visitRequest(request);
     if (typeof request.code !== 'string' || Buffer.byteLength(request.code, 'utf8') > maxCodeBytes) {
       throw new BadRequestException('Code must be a string of at most 32000 bytes');
     }
@@ -70,11 +87,7 @@ class ChallengeService {
       [printedNumber],
     );
     if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
-    const ended = await this.db.pool.query(
-      "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND event_type IN ('challenge_solved', 'gave_up') LIMIT 1",
-      [request.visitId],
-    );
-    if (ended.rowCount) throw new BadRequestException('This challenge visit has ended');
+    await this.assertActiveVisit(printedNumber, visitId, learnerUsername);
 
     const cases: Array<{ stdin: string; expected: string }> = judged
       ? (challenge.rows[0].hidden_tests ?? []).map((test: { stdin?: string; output?: string; expected_output?: string }) => ({
@@ -91,8 +104,8 @@ class ChallengeService {
       const result = await this.run(request.code, test.stdin, limit);
       if (result.error) {
         await this.record(printedNumber, result);
-        if (judged) await this.recordInteraction(printedNumber, request.visitId, request.learnerUsername, 'submission_result', false);
-        else await this.recordInteraction(printedNumber, request.visitId, request.learnerUsername, 'code_run', null);
+        if (judged) await this.recordInteraction(printedNumber, visitId, learnerUsername, 'submission_result', false);
+        else await this.recordInteraction(printedNumber, visitId, learnerUsername, 'code_run', null);
         return judged
           ? { status: 'error', error: result.error }
           : { ...result, output: result.output.slice(0, maxOutputBytes) };
@@ -102,27 +115,52 @@ class ChallengeService {
     if (!judged) {
       const result = results[0];
       await this.record(printedNumber, result);
-      await this.recordInteraction(printedNumber, request.visitId, request.learnerUsername, 'code_run', null);
+      await this.recordInteraction(printedNumber, visitId, learnerUsername, 'code_run', null);
       return { ...result, output: result.output.slice(0, maxOutputBytes) };
     }
 
     const passed = cases.filter((test, index) => normalize(results[index].output) === normalize(test.expected)).length;
     const category = passed === cases.length ? 'accepted' : 'wrong_answer';
     await this.record(printedNumber, { version: pythonVersion, durationMs: results.reduce((sum, r) => sum + r.durationMs, 0), exitStatus: 0, error: category });
-    await this.recordInteraction(printedNumber, request.visitId, request.learnerUsername, 'submission_result', passed === cases.length);
-    if (passed === cases.length) await this.recordInteraction(printedNumber, request.visitId, request.learnerUsername, 'challenge_solved', true);
+    await this.recordInteraction(printedNumber, visitId, learnerUsername, 'submission_result', passed === cases.length);
+    if (passed === cases.length) await this.recordInteraction(printedNumber, visitId, learnerUsername, 'challenge_solved', true);
     return { status: category, passed, total: cases.length };
   }
 
-  private recordInteraction(number: number, visitId: string, username: string, event: 'code_run' | 'submission_result' | 'challenge_solved', correct: boolean | null) {
+  private recordInteraction(number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null) {
     return this.db.pool.query(
       `INSERT INTO learning_interactions
        (visit_id, learner_username, challenge_id, event_type, content_version, language,
         assessed_skill_id, difficulty, is_correct)
-       SELECT $2, $3, printed_number, $4, content_version, 'python', assessed_skill_id, difficulty, $5
+       SELECT $2, $3, printed_number, $4, content_version,
+              CASE WHEN $4 IN ('challenge_opened', 'gave_up') THEN NULL ELSE 'python' END,
+              assessed_skill_id, difficulty, $5
        FROM challenges WHERE printed_number = $1`,
       [number, visitId, username, event, correct],
     );
+  }
+
+  private visitRequest(body: unknown) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestException('Invalid request');
+    const request = body as Record<string, unknown>;
+    if (typeof request.visitId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.visitId)
+      || typeof request.learnerUsername !== 'string') throw new BadRequestException('A visit ID and learner pseudonym are required');
+    const learnerUsername = request.learnerUsername.trim().normalize('NFKC').toLowerCase();
+    if (/[\p{Cc}\p{Cf}]/u.test(learnerUsername) || !/^[\p{L}\p{N} _-]{1,40}$/u.test(learnerUsername)) {
+      throw new BadRequestException('Use 1–40 letters, numbers, spaces, hyphens, or underscores; control characters are not allowed');
+    }
+    return { visitId: request.visitId, learnerUsername };
+  }
+
+  private async assertActiveVisit(number: number, visitId: string, username: string) {
+    const result = await this.db.pool.query(
+      `SELECT 1 FROM learning_interactions opened
+       WHERE opened.visit_id = $1 AND opened.challenge_id = $2 AND opened.learner_username = $3
+         AND opened.event_type = 'challenge_opened'
+         AND NOT EXISTS (SELECT 1 FROM learning_interactions ended WHERE ended.visit_id = $1 AND ended.event_type IN ('challenge_solved', 'gave_up'))
+       LIMIT 1`, [visitId, number, username],
+    );
+    if (!result.rowCount) throw new BadRequestException('This challenge visit is not active');
   }
 
   private async run(code: string, stdin: string, timeout: number) {
@@ -181,6 +219,18 @@ class ChallengeController {
   findByNumber(@Param('number', ParseIntPipe) number: number) {
     if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
     return this.challenges.findByNumber(number);
+  }
+
+  @Post(':number/open')
+  open(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
+    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    return this.challenges.openVisit(number, body);
+  }
+
+  @Post(':number/end')
+  end(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
+    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    return this.challenges.endVisit(number, body);
   }
 
   @Post(':number/run')
