@@ -47,12 +47,23 @@ CREATE TABLE learning_interactions (
     OR (event_type NOT IN ('submission_result', 'challenge_solved') AND is_correct IS NULL)
   ),
   CHECK (event_type <> 'challenge_solved' OR is_correct),
-  CHECK (
-    (event_type = 'hint_revealed' AND metadata ? 'hint_index'
+  CONSTRAINT learning_interactions_metadata_contract CHECK (
+    (event_type = 'hint_revealed' AND event_version = 1 AND metadata ? 'hint_index'
       AND jsonb_typeof(metadata->'hint_index') = 'number'
       AND metadata->>'hint_index' ~ '^[0-9]+$'
       AND metadata - 'hint_index' = '{}'::jsonb)
-    OR (event_type <> 'hint_revealed' AND metadata = '{}'::jsonb)
+    OR (event_type = 'submission_result' AND event_version = 1 AND metadata = '{}'::jsonb)
+    OR (event_type = 'submission_result' AND event_version = 2
+      AND jsonb_typeof(metadata->'attempt_order') = 'number'
+      AND jsonb_typeof(metadata->'elapsed_ms') = 'number'
+      AND jsonb_typeof(metadata->'failed_test_count') = 'number'
+      AND jsonb_typeof(metadata->'error_category') = 'string'
+      AND metadata->>'attempt_order' ~ '^[1-9][0-9]*$'
+      AND metadata->>'elapsed_ms' ~ '^[0-9]+$'
+      AND metadata->>'failed_test_count' ~ '^[0-9]+$'
+      AND metadata->>'error_category' IN ('accepted', 'wrong_answer', 'syntax_error', 'runtime_error', 'time_limit_exceeded', 'runner_unavailable', 'output_limit_exceeded')
+      AND metadata - ARRAY['attempt_order', 'elapsed_ms', 'failed_test_count', 'error_category']::text[] = '{}'::jsonb)
+    OR (event_type NOT IN ('hint_revealed', 'submission_result') AND metadata = '{}'::jsonb)
   )
 );
 
