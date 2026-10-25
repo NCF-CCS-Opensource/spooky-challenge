@@ -56,6 +56,20 @@ CREATE TABLE learning_interactions (
   )
 );
 
+CREATE TABLE code_executions (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  challenge_id integer NOT NULL REFERENCES challenges(printed_number),
+  language text NOT NULL CHECK (language = 'python'),
+  runtime_version text NOT NULL,
+  duration_ms integer NOT NULL CHECK (duration_ms >= 0),
+  exit_status integer,
+  error_category text CHECK (error_category IN (
+    'syntax_error', 'runtime_error', 'time_limit_exceeded', 'runner_unavailable',
+    'output_limit_exceeded', 'accepted', 'wrong_answer'
+  )),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE UNIQUE INDEX one_terminal_event_per_visit ON learning_interactions (visit_id)
   WHERE event_type IN ('challenge_solved', 'gave_up');
 CREATE UNIQUE INDEX one_reveal_per_hint_per_visit
