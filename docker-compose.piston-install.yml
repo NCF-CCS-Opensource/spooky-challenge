@@ -1,0 +1,5 @@
+# One-time overlay: gives Piston internet so the API can install the pinned Python runtime.
+# The runtime persists in the piston-packages volume; start without this overlay afterwards (see docs/runbook.md).
+services:
+  piston:
+    networks: [runner, app]
