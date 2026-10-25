@@ -7,4 +7,6 @@ COPY apps/api/package.json apps/api/package.json
 RUN pnpm install --frozen-lockfile
 COPY apps/web apps/web
 RUN pnpm --filter web build
+RUN chown -R node:node /app
+USER node
 CMD ["pnpm", "--filter", "web", "start"]
