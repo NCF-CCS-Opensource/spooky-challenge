@@ -1,0 +1,1 @@
+{"name":"treat-or-code","private":true,"packageManager":"pnpm@10.15.0","scripts":{"dev":"turbo run dev --parallel","dev:compose":"docker compose up --build","dev:down":"docker compose down","build":"turbo run build","typecheck":"turbo run typecheck"},"devDependencies":{"turbo":"^2.5.0"}}
