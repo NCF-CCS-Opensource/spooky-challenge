@@ -61,14 +61,16 @@ class ChallengeService {
 
   async endVisit(printedNumber: number, body: unknown) {
     const { visitId, learnerUsername } = this.visitRequest(body);
-    const ended = await this.db.pool.query(
-      "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id = $2 AND learner_username = $3 AND event_type = 'gave_up' LIMIT 1",
-      [visitId, printedNumber, learnerUsername],
-    );
-    if (ended.rowCount) return { ended: true };
-    await this.assertActiveVisit(printedNumber, visitId, learnerUsername);
-    await this.recordInteraction(printedNumber, visitId, learnerUsername, 'gave_up', null);
-    return { ended: true };
+    return this.withVisitLock(visitId, async () => {
+      const ended = await this.db.pool.query(
+        "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id = $2 AND learner_username = $3 AND event_type = 'gave_up' LIMIT 1",
+        [visitId, printedNumber, learnerUsername],
+      );
+      if (ended.rowCount) return { ended: true };
+      await this.assertActiveVisit(printedNumber, visitId, learnerUsername);
+      await this.recordInteraction(printedNumber, visitId, learnerUsername, 'gave_up', null);
+      return { ended: true };
+    });
   }
 
   async execute(printedNumber: number, body: unknown, judged: boolean) {
@@ -84,7 +86,10 @@ class ChallengeService {
     if (typeof request.stdin !== 'string' || Buffer.byteLength(request.stdin, 'utf8') > maxInputBytes) {
       throw new BadRequestException('Input must be a string of at most 8000 bytes');
     }
+    const code = request.code;
+    const stdin = request.stdin;
 
+    return this.withVisitLock(visitId, async () => {
     const challenge = await this.db.pool.query(
       'SELECT hidden_tests, judge_config FROM challenges WHERE printed_number = $1', [printedNumber],
     );
@@ -106,7 +111,7 @@ class ChallengeService {
       ? (challenge.rows[0].hidden_tests ?? []).map((test: { stdin?: string; output?: string; expected_output?: string }) => ({
           stdin: test.stdin ?? '', expected: test.expected_output ?? test.output ?? '',
         }))
-      : [{ stdin: request.stdin, expected: '' }];
+      : [{ stdin, expected: '' }];
     if (judged && cases.length === 0) throw new BadRequestException('This challenge has no judge tests configured');
     if (cases.length > 100 || cases.some((test) => Buffer.byteLength(test.stdin, 'utf8') > maxInputBytes || Buffer.byteLength(test.expected, 'utf8') > maxOutputBytes)) {
       throw new BadRequestException('Challenge judge data exceeds execution limits');
@@ -114,7 +119,7 @@ class ChallengeService {
     const limit = Math.min(3000, Math.max(100, Number(challenge.rows[0].judge_config?.time_limit_ms) || 2000));
     const results: ExecutionResult[] = [];
     for (const test of cases) {
-      const result = await this.run(request.code, test.stdin, limit);
+      const result = await this.run(code, test.stdin, limit);
       if (result.error) {
         await this.record(printedNumber, result);
         if (judged) await this.recordInteraction(printedNumber, visitId, learnerUsername, 'submission_result', false, {
@@ -153,6 +158,26 @@ class ChallengeService {
       );
     }
     return { status: category, passed, total: cases.length };
+    });
+  }
+
+  private async withVisitLock<T>(visitId: string, action: () => Promise<T>): Promise<T> {
+    const client = await this.db.pool.connect();
+    let transaction = false;
+    try {
+      await client.query('BEGIN');
+      transaction = true;
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [visitId]);
+      const result = await action();
+      await client.query('COMMIT');
+      transaction = false;
+      return result;
+    } catch (error) {
+      if (transaction) await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   private recordInteraction(number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null, metadata = {}, eventVersion = 1) {
