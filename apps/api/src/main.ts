@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 
 const pythonVersion = process.env.PISTON_PYTHON_VERSION ?? '3.12.0';
 const pistonUrl = process.env.PISTON_URL ?? 'http://localhost:2000';
@@ -49,28 +49,28 @@ class ChallengeService {
 
   async openVisit(printedNumber: number, body: unknown) {
     const { visitId, learnerUsername } = this.visitRequest(body);
-    return this.withLocks([`challenge:${printedNumber}`], async () => {
-      const challenge = await this.db.pool.query('SELECT 1 FROM challenges WHERE printed_number = $1', [printedNumber]);
+    return this.withLocks([`challenge:${printedNumber}`], async (client) => {
+      const challenge = await client.query('SELECT 1 FROM challenges WHERE printed_number = $1', [printedNumber]);
       if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
-      const solved = await this.db.pool.query(
+      const solved = await client.query(
         "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1", [printedNumber],
       );
       if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
-      await this.recordInteraction(printedNumber, visitId, learnerUsername, 'challenge_opened', null);
+      await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'challenge_opened', null);
       return { visitId, learnerUsername };
     });
   }
 
   async endVisit(printedNumber: number, body: unknown) {
     const { visitId, learnerUsername } = this.visitRequest(body);
-    return this.withLocks([`visit:${visitId}`], async () => {
-      const ended = await this.db.pool.query(
+    return this.withLocks([`visit:${visitId}`], async (client) => {
+      const ended = await client.query(
         "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id = $2 AND learner_username = $3 AND event_type = 'gave_up' LIMIT 1",
         [visitId, printedNumber, learnerUsername],
       );
       if (ended.rowCount) return { ended: true };
-      await this.assertActiveVisit(printedNumber, visitId, learnerUsername);
-      await this.recordInteraction(printedNumber, visitId, learnerUsername, 'gave_up', null);
+      await this.assertActiveVisit(client, printedNumber, visitId, learnerUsername);
+      await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'gave_up', null);
       return { ended: true };
     });
   }
@@ -91,20 +91,20 @@ class ChallengeService {
     const code = request.code;
     const stdin = request.stdin;
 
-    return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async () => {
-    const challenge = await this.db.pool.query(
+    return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async (client) => {
+    const challenge = await client.query(
       'SELECT hidden_tests, judge_config FROM challenges WHERE printed_number = $1', [printedNumber],
     );
     if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
-    const solved = await this.db.pool.query(
+    const solved = await client.query(
       "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1",
       [printedNumber],
     );
     if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
-    await this.assertActiveVisit(printedNumber, visitId, learnerUsername);
+    await this.assertActiveVisit(client, printedNumber, visitId, learnerUsername);
 
     const started = Date.now();
-    const attempts = judged ? await this.db.pool.query(
+    const attempts = judged ? await client.query(
       "SELECT count(*) FROM learning_interactions WHERE visit_id = $1 AND event_type = 'submission_result'", [visitId],
     ) : null;
     const attemptOrder = attempts ? Number(attempts.rows[0].count) + 1 : null;
@@ -123,11 +123,11 @@ class ChallengeService {
     for (const test of cases) {
       const result = await this.run(code, test.stdin, limit);
       if (result.error) {
-        await this.record(printedNumber, result);
-        if (judged) await this.recordInteraction(printedNumber, visitId, learnerUsername, 'submission_result', false, {
+        await this.record(client, printedNumber, result);
+        if (judged) await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', false, {
           attempt_order: attemptOrder, elapsed_ms: Date.now() - started, failed_test_count: 1, error_category: result.error,
         }, 2);
-        else await this.recordInteraction(printedNumber, visitId, learnerUsername, 'code_run', null);
+        else await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
         return judged
           ? { status: 'error', error: result.error }
           : { ...result, output: result.output.slice(0, maxOutputBytes) };
@@ -136,20 +136,20 @@ class ChallengeService {
     }
     if (!judged) {
       const result = results[0];
-      await this.record(printedNumber, result);
-      await this.recordInteraction(printedNumber, visitId, learnerUsername, 'code_run', null);
+      await this.record(client, printedNumber, result);
+      await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
       return { ...result, output: result.output.slice(0, maxOutputBytes) };
     }
 
     const passed = cases.filter((test, index) => normalize(results[index].output) === normalize(test.expected)).length;
     const category = passed === cases.length ? 'accepted' : 'wrong_answer';
     const elapsedMs = Date.now() - started;
-    await this.record(printedNumber, { version: pythonVersion, durationMs: results.reduce((sum, r) => sum + r.durationMs, 0), exitStatus: 0, error: category });
-    await this.recordInteraction(printedNumber, visitId, learnerUsername, 'submission_result', passed === cases.length, {
+    await this.record(client, printedNumber, { version: pythonVersion, durationMs: results.reduce((sum, r) => sum + r.durationMs, 0), exitStatus: 0, error: category });
+    await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', passed === cases.length, {
       attempt_order: attemptOrder, elapsed_ms: elapsedMs, failed_test_count: cases.length - passed, error_category: category,
     }, 2);
     if (passed === cases.length) {
-      await this.db.pool.query(
+      await client.query(
         `INSERT INTO learning_interactions
          (visit_id, learner_username, challenge_id, event_type, content_version, language,
           assessed_skill_id, difficulty, is_correct)
@@ -163,14 +163,14 @@ class ChallengeService {
     });
   }
 
-  private async withLocks<T>(keys: string[], action: () => Promise<T>): Promise<T> {
+  private async withLocks<T>(keys: string[], action: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.db.pool.connect();
     let transaction = false;
     try {
       await client.query('BEGIN');
       transaction = true;
       for (const key of keys) await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
-      const result = await action();
+      const result = await action(client);
       await client.query('COMMIT');
       transaction = false;
       return result;
@@ -182,8 +182,8 @@ class ChallengeService {
     }
   }
 
-  private recordInteraction(number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null, metadata = {}, eventVersion = 1) {
-    return this.db.pool.query(
+  private recordInteraction(client: PoolClient, number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null, metadata = {}, eventVersion = 1) {
+    return client.query(
       `INSERT INTO learning_interactions
        (visit_id, learner_username, challenge_id, event_type, content_version, language,
         assessed_skill_id, difficulty, is_correct, metadata, event_version)
@@ -207,8 +207,8 @@ class ChallengeService {
     return { visitId: request.visitId, learnerUsername };
   }
 
-  private async assertActiveVisit(number: number, visitId: string, username: string) {
-    const result = await this.db.pool.query(
+  private async assertActiveVisit(client: PoolClient, number: number, visitId: string, username: string) {
+    const result = await client.query(
       `SELECT 1 FROM learning_interactions opened
        WHERE opened.visit_id = $1 AND opened.challenge_id = $2 AND opened.learner_username = $3
          AND opened.event_type = 'challenge_opened'
@@ -251,8 +251,8 @@ class ChallengeService {
     return { version: String(data.version ?? pythonVersion), durationMs: Date.now() - started, exitStatus: data.run?.code ?? null, output, error };
   }
 
-  private record(number: number, result: { version: string; durationMs: number; exitStatus: number | null; error: string | null }) {
-    return this.db.pool.query(
+  private record(client: PoolClient, number: number, result: { version: string; durationMs: number; exitStatus: number | null; error: string | null }) {
+    return client.query(
       `INSERT INTO code_executions (challenge_id, language, runtime_version, duration_ms, exit_status, error_category)
        VALUES ($1, 'python', $2, $3, $4, $5)`,
       [number, result.version, result.durationMs, result.exitStatus, result.error],
