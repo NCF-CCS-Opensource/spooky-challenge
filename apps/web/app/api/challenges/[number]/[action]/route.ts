@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 
 export async function POST(request: Request, { params }: { params: Promise<{ number: string; action: string }> }) {
   const { number, action } = await params;
-  if (!/^\d{1,3}$/.test(number) || !['run', 'check'].includes(action)) {
+  if (!/^\d{1,3}$/.test(number) || !['run', 'check', 'open', 'end'].includes(action)) {
     return NextResponse.json({ message: 'Not found' }, { status: 404 });
   }
   try {
