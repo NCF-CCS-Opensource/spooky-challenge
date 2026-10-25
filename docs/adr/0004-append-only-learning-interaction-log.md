@@ -13,7 +13,7 @@
 | `challenge_solved` | true | `{}` | judged language |
 | `gave_up` | null | `{}` | null |
 
-`submission_result` event version 2 records `attempt_order`, `elapsed_ms`, `failed_test_count`, and `error_category` in metadata. New judged attempts use version 2; existing version 1 events remain valid. Output comparison converts CRLF to LF and ignores trailing whitespace.
+`submission_result` event version 2 records `attempt_order`, `elapsed_ms`, `failed_test_count`, and `error_category` in metadata. New judged attempts use version 2; existing version 1 events remain valid. Output comparison converts CRLF to LF and strips trailing whitespace from the end of the whole output (per-line trailing spaces still matter).
 
 `challenge_id`, `content_version`, `assessed_skill_id`, and `difficulty` capture the challenge context on every row. `created_at` is assigned by the database on insert. Update and delete operations are rejected so this log remains append-only. The schema does not retain source code, program output, secrets, or hidden test inputs or outputs.
 

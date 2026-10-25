@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { python } from '@codemirror/lang-python';
 
@@ -12,7 +12,9 @@ const usernameKey = 'treat-or-code-learner';
 function normalizeUsername(value: string) { return value.trim().normalize('NFKC').toLowerCase(); }
 function validUsername(value: string) { return value.length >= 1 && value.length <= 40 && !/[\p{Cc}\p{Cf}]/u.test(value) && /^[\p{L}\p{N} _-]+$/u.test(value); }
 
-export default function Editor({ number, pythonVersion, starterCode, examples }: Readonly<{ number: number; pythonVersion: string; starterCode: string; examples: Array<{ input?: string }> }>) {
+export default function Editor({ number, pythonVersion, starterCode, examples, hints }: Readonly<{ number: number; pythonVersion: string; starterCode: string; examples: Array<{ input?: string }>; hints: string[] }>) {
+  const starting = useRef(false);
+  const [revealed, setRevealed] = useState(0);
   const [code, setCode] = useState(starterCode);
   const [stdin, setStdin] = useState(examples[0]?.input ?? '');
   const [result, setResult] = useState<Result | null>(null);
@@ -39,6 +41,8 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
   }, [number]);
 
   async function startVisit() {
+    if (starting.current) return;
+    starting.current = true;
     const normalized = normalizeUsername(username);
     if (!validUsername(normalized)) { setError('Use 1–40 letters, numbers, spaces, hyphens, or underscores. Control characters are not allowed.'); return; }
     setBusy(true); setError('');
@@ -53,6 +57,20 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
       localStorage.setItem(usernameKey, normalized);
       localStorage.setItem(visitKey, JSON.stringify(newVisit));
       setVisit(newVisit); setMode('active');
+    } catch { setError('The challenge service is unavailable. Please try again.'); }
+    finally { setBusy(false); starting.current = false; }
+  }
+
+  async function revealHint() {
+    if (!visit || revealed >= hints.length) return;
+    setBusy(true); setError('');
+    try {
+      const response = await fetch(`/api/challenges/${number}/hint`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ visitId: visit.visitId, learnerUsername: visit.learnerUsername, hintIndex: revealed }),
+      });
+      if (response.ok) setRevealed(revealed + 1);
+      else setError((await response.json()).message ?? 'Could not reveal the hint. Please try again.');
     } catch { setError('The challenge service is unavailable. Please try again.'); }
     finally { setBusy(false); }
   }
@@ -118,6 +136,8 @@ export default function Editor({ number, pythonVersion, starterCode, examples }:
         <button type="button" onClick={() => submit('check')} disabled={busy || mode !== 'active'}>Check Solution</button>
         {mode === 'active' && <button type="button" className="end-button" onClick={() => endVisit(visit)} disabled={busy}>End challenge</button>}
       </div>
+      {hints.slice(0, revealed).map((hint, index) => <p key={`${index}-${hint}`} className="hint"><strong>Hint {index + 1}:</strong> {hint}</p>)}
+      {mode === 'active' && revealed < hints.length && <button type="button" onClick={revealHint} disabled={busy}>Show hint {revealed + 1} of {hints.length}</button>}
       {mode === 'ended' && result?.status !== 'accepted' && <output className="visit-status">This visit has ended. Open the challenge again to start a new visit.</output>}
       {error && <p role="alert">{error}</p>}
       {result && <section className="result" aria-live="polite">

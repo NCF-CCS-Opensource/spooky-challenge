@@ -34,7 +34,7 @@ A physical-digital game: students draw a numbered paper slip, type its number, a
 ## Capabilities and Constraints
 
 - Usernames are self-chosen, unverified pseudonyms that link a learner's visits; they are never listed or ranked, and exports replace them with keyed hashes (ADR 0002).
-- The database holds only `challenges` and `learning_interactions` (an append-only event log). Source code and full program output are not retained.
+- The database holds `challenges`, `learning_interactions` (an append-only event log) and `code_executions` (runner metadata only: version, duration, exit status, error category; see ADR 0005). Source code and full program output are not retained.
 - Hidden tests never reach the client; student code runs only in Piston.
 - Undecided: the content and skill list for the 100 challenges (#2, human-authored).
 

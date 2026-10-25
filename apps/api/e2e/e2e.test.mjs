@@ -157,3 +157,18 @@ test('ending a solved visit is idempotent', async () => {
   assert.equal((await submit('check', 99, visit.visitId, 'solver', DOUBLE)).body.status, 'accepted');
   assert.equal((await post('/challenges/99/end', { visitId: visit.visitId, learnerUsername: 'solver' })).status, 201);
 });
+
+test('hint reveal logs one event per hint index and rejects unknown hints', async () => {
+  await db.query(`UPDATE challenges SET hints = '["first","second"]' WHERE printed_number = 87`);
+  const visit = await open(87, 'hinter');
+  const hint = (hintIndex) => post('/challenges/87/hint', { visitId: visit.visitId, learnerUsername: 'hinter', hintIndex });
+  assert.equal((await hint(0)).status, 201);
+  assert.equal((await hint(0)).status, 201);
+  assert.equal((await hint(1)).status, 201);
+  assert.equal((await hint(2)).status, 400);
+  assert.equal((await hint(-1)).status, 400);
+  assert.deepEqual(await events(visit.visitId), ['challenge_opened', 'hint_revealed', 'hint_revealed']);
+  const { rows } = await db.query("SELECT is_correct, language, metadata FROM learning_interactions WHERE visit_id = $1 AND event_type = 'hint_revealed' ORDER BY id", [visit.visitId]);
+  assert.deepEqual(rows.map((r) => [r.is_correct, r.language, r.metadata]), [[null, null, { hint_index: 0 }], [null, null, { hint_index: 1 }]]);
+  assert.equal((await post('/challenges/87/hint', { visitId: randomUUID(), learnerUsername: 'hinter', hintIndex: 0 })).status, 400);
+});

@@ -1,6 +1,4 @@
 import 'reflect-metadata';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import {
   BadRequestException, Body, Controller, Get, Injectable, Module, NotFoundException,
   Param, ParseIntPipe, Post,
@@ -16,6 +14,11 @@ const maxInputBytes = 8_000;
 const maxOutputBytes = 16_000;
 const maxRunnerResponseBytes = 64_000;
 const maxJudgeMs = 20_000;
+const minRunMs = 100;
+const maxRunMs = 3000;
+const defaultRunMs = 2000;
+const maxJudgeCases = 100;
+const maxChallenge = 100;
 type ExecutionResult = { version: string; durationMs: number; exitStatus: number | null; output: string; error: string | null };
 
 @Injectable()
@@ -77,6 +80,22 @@ class ChallengeService {
     });
   }
 
+  async revealHint(printedNumber: number, body: unknown) {
+    const { visitId, learnerUsername } = this.visitRequest(body);
+    const hintIndex = (body as Record<string, unknown>).hintIndex;
+    return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async (client) => {
+      const challenge = await client.query('SELECT jsonb_array_length(hints) AS hints FROM challenges WHERE printed_number = $1', [printedNumber]);
+      if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
+      if (!Number.isInteger(hintIndex) || (hintIndex as number) < 0 || (hintIndex as number) >= challenge.rows[0].hints) {
+        throw new BadRequestException('Unknown hint');
+      }
+      await this.assertPlayable(client, printedNumber, visitId, learnerUsername);
+      // Revealing the same hint again is not a new event: the partial unique index makes it a no-op.
+      await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'hint_revealed', null, { metadata: { hint_index: hintIndex }, onConflictDoNothing: true });
+      return { revealed: hintIndex };
+    });
+  }
+
   async execute(printedNumber: number, body: unknown, judged: boolean) {
     const { visitId, learnerUsername, code, stdin } = this.executeRequest(body);
     const locks = [`visit:${visitId}`, `challenge:${printedNumber}`];
@@ -98,15 +117,15 @@ class ChallengeService {
         }))
       : [{ stdin, expected: '' }];
     if (judged && cases.length === 0) throw new BadRequestException('This challenge has no judge tests configured');
-    if (cases.length > 100 || cases.some((test) => Buffer.byteLength(test.stdin, 'utf8') > maxInputBytes || Buffer.byteLength(test.expected, 'utf8') > maxOutputBytes)) {
+    if (cases.length > maxJudgeCases || cases.some((test) => Buffer.byteLength(test.stdin, 'utf8') > maxInputBytes || Buffer.byteLength(test.expected, 'utf8') > maxOutputBytes)) {
       throw new BadRequestException('Challenge judge data exceeds execution limits');
     }
-    const limit = Math.min(3000, Math.max(100, Number(challenge.judge_config?.time_limit_ms) || 2000));
+    const limit = Math.min(maxRunMs, Math.max(minRunMs, Number(challenge.judge_config?.time_limit_ms) || defaultRunMs));
     const results: ExecutionResult[] = [];
     for (const test of cases) {
       const remaining = maxJudgeMs - (Date.now() - started);
-      const result = remaining < 100
-        ? { version: pythonVersion, durationMs: 0, exitStatus: null, output: '', error: 'time_limit_exceeded' }
+      const result = remaining < minRunMs
+        ? failure(Date.now(), 'time_limit_exceeded')
         : await this.run(code, test.stdin, Math.min(limit, remaining)); // NOSONAR: tests must run sequentially and stop at the first runner error
       results.push(result);
       if (result.error) break;
@@ -124,6 +143,11 @@ class ChallengeService {
         await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
         return { ...result, output: result.output.slice(0, maxOutputBytes) };
       }
+      if (failedRun?.error === 'runner_unavailable') {
+        // Infrastructure failure is not a learner attempt: keep it out of the event log, record it as execution metadata only.
+        await this.record(client, printedNumber, failedRun);
+        return { status: 'error', error: 'runner_unavailable' };
+      }
       const attempts = await client.query(
         "SELECT count(*) FROM learning_interactions WHERE visit_id = $1 AND event_type = 'submission_result'", [visitId],
       );
@@ -134,7 +158,7 @@ class ChallengeService {
       });
       if (failedRun) return { status: 'error', error: category };
       if (passed === cases.length) {
-        await client.query(
+        const solve = await client.query(
           `INSERT INTO learning_interactions
            (visit_id, learner_username, challenge_id, event_type, content_version, language,
             assessed_skill_id, difficulty, is_correct)
@@ -143,6 +167,7 @@ class ChallengeService {
            ON CONFLICT DO NOTHING`,
           [printedNumber, visitId, learnerUsername],
         );
+        if (!solve.rowCount) throw new BadRequestException('This challenge has already been solved');
       }
       return { status: category, passed, total: cases.length };
     });
@@ -196,15 +221,15 @@ class ChallengeService {
     }
   }
 
-  private recordInteraction(client: PoolClient, number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up', correct: boolean | null, { metadata = {}, eventVersion = 1 } = {}) {
+  private recordInteraction(client: PoolClient, number: number, visitId: string, username: string, event: 'challenge_opened' | 'code_run' | 'submission_result' | 'challenge_solved' | 'gave_up' | 'hint_revealed', correct: boolean | null, { metadata = {}, eventVersion = 1, onConflictDoNothing = false } = {}) {
     return client.query(
       `INSERT INTO learning_interactions
        (visit_id, learner_username, challenge_id, event_type, content_version, language,
         assessed_skill_id, difficulty, is_correct, metadata, event_version)
        SELECT $2, $3, printed_number, $4, content_version,
-              CASE WHEN $4 IN ('challenge_opened', 'gave_up') THEN NULL ELSE 'python' END,
+              CASE WHEN $4 IN ('challenge_opened', 'gave_up', 'hint_revealed') THEN NULL ELSE 'python' END,
               assessed_skill_id, difficulty, $5, $6::jsonb, $7
-       FROM challenges WHERE printed_number = $1`,
+       FROM challenges WHERE printed_number = $1${onConflictDoNothing ? ' ON CONFLICT DO NOTHING' : ''}`,
       [number, visitId, username, event, correct, JSON.stringify(metadata), eventVersion],
     );
   }
@@ -245,14 +270,14 @@ class ChallengeService {
         signal: AbortSignal.timeout(timeout + 5000),
       });
     } catch {
-      return { version: pythonVersion, durationMs: Date.now() - started, exitStatus: null, output: '', error: 'runner_unavailable' };
+      return failure(started, 'runner_unavailable');
     }
-    if (!response.ok) return { version: pythonVersion, durationMs: Date.now() - started, exitStatus: null, output: '', error: 'runner_unavailable' };
+    if (!response.ok) return failure(started, 'runner_unavailable');
     const raw = await readBounded(response, maxRunnerResponseBytes);
-    if (raw === null) return { version: pythonVersion, durationMs: Date.now() - started, exitStatus: null, output: '', error: 'output_limit_exceeded' };
+    if (raw === null) return failure(started, 'output_limit_exceeded');
     let data: any;
     try { data = JSON.parse(raw); } catch {
-      return { version: pythonVersion, durationMs: Date.now() - started, exitStatus: null, output: '', error: 'runner_unavailable' };
+      return failure(started, 'runner_unavailable');
     }
     const stdout = String(data.run?.stdout ?? '');
     const stderr = String(data.run?.stderr ?? '');
@@ -286,31 +311,37 @@ class ChallengeController {
 
   @Get(':number')
   findByNumber(@Param('number', ParseIntPipe) number: number) {
-    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    assertChallengeNumber(number);
     return this.challenges.findByNumber(number);
   }
 
   @Post(':number/open')
   open(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
-    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    assertChallengeNumber(number);
     return this.challenges.openVisit(number, body);
   }
 
   @Post(':number/end')
   end(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
-    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    assertChallengeNumber(number);
     return this.challenges.endVisit(number, body);
+  }
+
+  @Post(':number/hint')
+  hint(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
+    assertChallengeNumber(number);
+    return this.challenges.revealHint(number, body);
   }
 
   @Post(':number/run')
   run(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
-    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    assertChallengeNumber(number);
     return this.challenges.execute(number, body, false);
   }
 
   @Post(':number/check')
   check(@Param('number', ParseIntPipe) number: number, @Body() body: unknown) {
-    if (number < 1 || number > 100) throw new NotFoundException('Challenge not found');
+    assertChallengeNumber(number);
     return this.challenges.execute(number, body, true);
   }
 }
@@ -321,20 +352,6 @@ class AppModule {}
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
   app.useBodyParser('json', { limit: '64kb' });
-  await app.get(Database).pool.query(`CREATE TABLE IF NOT EXISTS code_executions (
-    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    challenge_id integer NOT NULL REFERENCES challenges(printed_number),
-    language text NOT NULL CHECK (language = 'python'),
-    runtime_version text NOT NULL,
-    duration_ms integer NOT NULL CHECK (duration_ms >= 0),
-    exit_status integer,
-    error_category text CHECK (error_category IN (
-      'syntax_error', 'runtime_error', 'time_limit_exceeded', 'runner_unavailable',
-      'output_limit_exceeded', 'accepted', 'wrong_answer'
-    )),
-    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
-  )`);
-  await app.get(Database).pool.query(readFileSync(join(__dirname, '../db/002-submission-result-v2.sql'), 'utf8'));
   await ensurePythonRuntime();
   await app.listen(process.env.PORT ?? 3001, '0.0.0.0');
 }
@@ -363,10 +380,15 @@ async function readBounded(response: Response, maxBytes: number): Promise<string
     if (size > maxBytes) { await reader.cancel(); return null; }
     chunks.push(value);
   }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(bytes);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function assertChallengeNumber(number: number) {
+  if (number < 1 || number > maxChallenge) throw new NotFoundException('Challenge not found');
+}
+
+function failure(started: number, error: string): ExecutionResult {
+  return { version: pythonVersion, durationMs: Date.now() - started, exitStatus: null, output: '', error };
 }
 
 function normalize(value: string) { return value.replaceAll('\r\n', '\n').trimEnd(); }

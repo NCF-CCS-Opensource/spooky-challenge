@@ -88,6 +88,7 @@ CREATE UNIQUE INDEX one_reveal_per_hint_per_visit
   WHERE event_type = 'hint_revealed';
 CREATE UNIQUE INDEX one_solve_per_challenge ON learning_interactions (challenge_id)
   WHERE event_type = 'challenge_solved';
+CREATE INDEX interactions_by_visit_event ON learning_interactions (visit_id, event_type);
 CREATE INDEX interactions_by_learner ON learning_interactions (learner_username, created_at, id);
 
 CREATE FUNCTION set_learning_interaction_timestamp() RETURNS trigger LANGUAGE plpgsql AS $$
