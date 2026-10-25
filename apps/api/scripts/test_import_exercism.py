@@ -48,6 +48,9 @@ class ConvertTests(unittest.TestCase):
     def test_rejects_exercise_with_inexpressible_assertion(self):
         self.assertIsNone(convert_tests(TESTS + "    def test_set(self):\n        self.assertEqual(half(2), {1})\n", {"half"}))
 
+    def test_rejects_nested_call_argument(self):
+        self.assertIsNone(convert_tests(TESTS + "    def test_nested(self):\n        self.assertEqual(half(half(8)), 2)\n", {"half"}))
+
     def test_driver_output_matches_expected_for_a_correct_solution(self):
         for case in convert_tests(TESTS, {"half", "halves"}):
             run = subprocess.run([sys.executable, "-I", "-c", SOLUTION + DRIVER], input=case["stdin"],

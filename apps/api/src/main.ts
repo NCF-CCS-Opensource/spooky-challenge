@@ -15,11 +15,12 @@ const maxCodeBytes = 32_000;
 const maxInputBytes = 8_000;
 const maxOutputBytes = 16_000;
 const maxRunnerResponseBytes = 64_000;
+const maxJudgeMs = 20_000;
 type ExecutionResult = { version: string; durationMs: number; exitStatus: number | null; output: string; error: string | null };
 
 @Injectable()
 class Database {
-  readonly pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  readonly pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 }
 
 @Injectable()
@@ -49,13 +50,14 @@ class ChallengeService {
 
   async openVisit(printedNumber: number, body: unknown) {
     const { visitId, learnerUsername } = this.visitRequest(body);
-    return this.withLocks([`challenge:${printedNumber}`], async (client) => {
+    return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async (client) => {
       const challenge = await client.query('SELECT 1 FROM challenges WHERE printed_number = $1', [printedNumber]);
       if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
-      const solved = await client.query(
-        "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1", [printedNumber],
+      await this.assertUnsolved(client, printedNumber);
+      const elsewhere = await client.query(
+        'SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id <> $2 LIMIT 1', [visitId, printedNumber],
       );
-      if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
+      if (elsewhere.rowCount) throw new BadRequestException('This visit belongs to a different challenge');
       await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'challenge_opened', null);
       return { visitId, learnerUsername };
     });
@@ -65,7 +67,7 @@ class ChallengeService {
     const { visitId, learnerUsername } = this.visitRequest(body);
     return this.withLocks([`visit:${visitId}`], async (client) => {
       const ended = await client.query(
-        "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id = $2 AND learner_username = $3 AND event_type = 'gave_up' LIMIT 1",
+        "SELECT 1 FROM learning_interactions WHERE visit_id = $1 AND challenge_id = $2 AND learner_username = $3 AND event_type IN ('gave_up', 'challenge_solved') LIMIT 1",
         [visitId, printedNumber, learnerUsername],
       );
       if (ended.rowCount) return { ended: true };
@@ -77,27 +79,21 @@ class ChallengeService {
 
   async execute(printedNumber: number, body: unknown, judged: boolean) {
     const { visitId, learnerUsername, code, stdin } = this.executeRequest(body);
+    const locks = [`visit:${visitId}`, `challenge:${printedNumber}`];
 
-    return this.withLocks([`visit:${visitId}`, `challenge:${printedNumber}`], async (client) => {
-    const challenge = await client.query(
-      'SELECT hidden_tests, judge_config FROM challenges WHERE printed_number = $1', [printedNumber],
-    );
-    if (!challenge.rowCount) throw new NotFoundException('Challenge not found');
-    const solved = await client.query(
-      "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1",
-      [printedNumber],
-    );
-    if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
-    await this.assertActiveVisit(client, printedNumber, visitId, learnerUsername);
+    // Hold the DB client and advisory locks only for checks and writes, never across Piston calls.
+    const challenge = await this.withLocks(locks, async (client) => {
+      const found = await client.query(
+        'SELECT hidden_tests, judge_config FROM challenges WHERE printed_number = $1', [printedNumber],
+      );
+      if (!found.rowCount) throw new NotFoundException('Challenge not found');
+      await this.assertPlayable(client, printedNumber, visitId, learnerUsername);
+      return found.rows[0];
+    });
 
     const started = Date.now();
-    const attempts = judged ? await client.query(
-      "SELECT count(*) FROM learning_interactions WHERE visit_id = $1 AND event_type = 'submission_result'", [visitId],
-    ) : null;
-    const attemptOrder = attempts ? Number(attempts.rows[0].count) + 1 : null;
-
     const cases: Array<{ stdin: string; expected: string }> = judged
-      ? (challenge.rows[0].hidden_tests ?? []).map((test: { stdin?: string; output?: string; expected_output?: string }) => ({
+      ? (challenge.hidden_tests ?? []).map((test: { stdin?: string; output?: string; expected_output?: string }) => ({
           stdin: test.stdin ?? '', expected: test.expected_output ?? test.output ?? '',
         }))
       : [{ stdin, expected: '' }];
@@ -105,49 +101,63 @@ class ChallengeService {
     if (cases.length > 100 || cases.some((test) => Buffer.byteLength(test.stdin, 'utf8') > maxInputBytes || Buffer.byteLength(test.expected, 'utf8') > maxOutputBytes)) {
       throw new BadRequestException('Challenge judge data exceeds execution limits');
     }
-    const limit = Math.min(3000, Math.max(100, Number(challenge.rows[0].judge_config?.time_limit_ms) || 2000));
+    const limit = Math.min(3000, Math.max(100, Number(challenge.judge_config?.time_limit_ms) || 2000));
     const results: ExecutionResult[] = [];
     for (const test of cases) {
-      const result = await this.run(code, test.stdin, limit); // NOSONAR: tests must run sequentially and stop at the first runner error
-      if (result.error) {
-        await this.record(client, printedNumber, result);
-        if (judged) await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', false, {
-          metadata: { attempt_order: attemptOrder, elapsed_ms: Date.now() - started, failed_test_count: 1, error_category: result.error }, eventVersion: 2,
-        });
-        else await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
-        return judged
-          ? { status: 'error', error: result.error }
-          : { ...result, output: result.output.slice(0, maxOutputBytes) };
-      }
+      const remaining = maxJudgeMs - (Date.now() - started);
+      const result = remaining < 100
+        ? { version: pythonVersion, durationMs: 0, exitStatus: null, output: '', error: 'time_limit_exceeded' }
+        : await this.run(code, test.stdin, Math.min(limit, remaining)); // NOSONAR: tests must run sequentially and stop at the first runner error
       results.push(result);
+      if (result.error) break;
     }
-    if (!judged) {
-      const result = results[0];
-      await this.record(client, printedNumber, result);
-      await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
-      return { ...result, output: result.output.slice(0, maxOutputBytes) };
-    }
-
-    const passed = cases.filter((test, index) => normalize(results[index].output) === normalize(test.expected)).length;
-    const category = passed === cases.length ? 'accepted' : 'wrong_answer';
+    const failedRun = results.find((result) => result.error);
+    const passed = failedRun ? 0 : cases.filter((test, index) => normalize(results[index].output) === normalize(test.expected)).length;
+    const category = failedRun?.error ?? (passed === cases.length ? 'accepted' : 'wrong_answer');
     const elapsedMs = Date.now() - started;
-    await this.record(client, printedNumber, { version: pythonVersion, durationMs: results.reduce((sum, r) => sum + r.durationMs, 0), exitStatus: 0, error: category });
-    await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', passed === cases.length, {
-      metadata: { attempt_order: attemptOrder, elapsed_ms: elapsedMs, failed_test_count: cases.length - passed, error_category: category }, eventVersion: 2,
-    });
-    if (passed === cases.length) {
-      await client.query(
-        `INSERT INTO learning_interactions
-         (visit_id, learner_username, challenge_id, event_type, content_version, language,
-          assessed_skill_id, difficulty, is_correct)
-         SELECT $2, $3, printed_number, 'challenge_solved', content_version, 'python', assessed_skill_id, difficulty, true
-         FROM challenges WHERE printed_number = $1
-         ON CONFLICT DO NOTHING`,
-        [printedNumber, visitId, learnerUsername],
+
+    return this.withLocks(locks, async (client) => {
+      await this.assertPlayable(client, printedNumber, visitId, learnerUsername);
+      if (!judged) {
+        const result = results[0];
+        await this.record(client, printedNumber, result);
+        await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'code_run', null);
+        return { ...result, output: result.output.slice(0, maxOutputBytes) };
+      }
+      const attempts = await client.query(
+        "SELECT count(*) FROM learning_interactions WHERE visit_id = $1 AND event_type = 'submission_result'", [visitId],
       );
-    }
-    return { status: category, passed, total: cases.length };
+      const durationMs = results.reduce((sum, r) => sum + r.durationMs, 0);
+      await this.record(client, printedNumber, { version: pythonVersion, durationMs, exitStatus: failedRun ? failedRun.exitStatus : 0, error: category });
+      await this.recordInteraction(client, printedNumber, visitId, learnerUsername, 'submission_result', passed === cases.length && !failedRun, {
+        metadata: { attempt_order: Number(attempts.rows[0].count) + 1, elapsed_ms: elapsedMs, failed_test_count: failedRun ? 1 : cases.length - passed, error_category: category }, eventVersion: 2,
+      });
+      if (failedRun) return { status: 'error', error: category };
+      if (passed === cases.length) {
+        await client.query(
+          `INSERT INTO learning_interactions
+           (visit_id, learner_username, challenge_id, event_type, content_version, language,
+            assessed_skill_id, difficulty, is_correct)
+           SELECT $2, $3, printed_number, 'challenge_solved', content_version, 'python', assessed_skill_id, difficulty, true
+           FROM challenges WHERE printed_number = $1
+           ON CONFLICT DO NOTHING`,
+          [printedNumber, visitId, learnerUsername],
+        );
+      }
+      return { status: category, passed, total: cases.length };
     });
+  }
+
+  private async assertPlayable(client: PoolClient, number: number, visitId: string, username: string) {
+    await this.assertUnsolved(client, number);
+    await this.assertActiveVisit(client, number, visitId, username);
+  }
+
+  private async assertUnsolved(client: PoolClient, number: number) {
+    const solved = await client.query(
+      "SELECT 1 FROM learning_interactions WHERE challenge_id = $1 AND event_type = 'challenge_solved' LIMIT 1", [number],
+    );
+    if (solved.rowCount) throw new BadRequestException('This challenge has already been solved');
   }
 
   private executeRequest(body: unknown) {

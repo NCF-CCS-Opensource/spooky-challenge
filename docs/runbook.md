@@ -11,8 +11,9 @@ Single booth computer, one organizer. Everything below is run from the repo root
    docker compose exec piston node -e "require('http').get('http://localhost:2000/api/v2/runtimes',r=>r.pipe(process.stdout))"   # must list python 3.12.0
    docker compose down        # keep volumes: the runtime lives in piston-packages
    ```
+   Start from a fresh database volume (`docker compose down -v` once, before the event): the API does not migrate a `learning_interactions` table built from an older `init.sql`, and boot fails on it. Never run `down -v` during the event.
    The pinned version is `PISTON_PYTHON_VERSION` (default `3.12.0`). The API refuses to start if it is missing, and every judged attempt is pinned to it.
-3. **Seed challenges** (numbers 1–100):
+3. **Seed challenges.** The importer converts only exercises whose tests it can express (47 of the first 100 candidates at the pinned ref), so `--limit 100` emits fewer than 100 rows. Every number 1–100 must resolve, so do not release until the seed (or hand-added challenges) covers all 100:
    ```sh
    python3 apps/api/scripts/import_exercism.py --start 1 --limit 100 > seed.sql
    docker compose up -d --wait
@@ -90,7 +91,7 @@ docker compose exec -T db psql -U "$POSTGRES_USER" "$POSTGRES_DB" -c "TRUNCATE l
 ```sh
 export COMPOSE_PROJECT_NAME=e2e
 docker compose -f docker-compose.yml -f docker-compose.piston-install.yml -f docker-compose.e2e.yml up -d --build --wait api
-pnpm --filter api test:e2e
+E2E_DISPOSABLE_DB=1 pnpm --filter api test:e2e
 docker compose -f docker-compose.yml -f docker-compose.piston-install.yml -f docker-compose.e2e.yml down -v
 ```
 

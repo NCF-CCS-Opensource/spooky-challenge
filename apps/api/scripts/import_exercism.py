@@ -76,6 +76,12 @@ class PendingCall:
 BUILTINS = {"zip": zip, "enumerate": enumerate, "list": list}
 
 
+def has_pending(item):
+    if isinstance(item, (list, tuple)):
+        return any(has_pending(part) for part in item)
+    return isinstance(item, PendingCall)
+
+
 def call(node, scope, functions):
     args = []
     for arg in node.args:
@@ -84,6 +90,8 @@ def call(node, scope, functions):
         else:
             args.append(value(arg, scope, functions))
     kwargs = {kw.arg: value(kw.value, scope, functions) for kw in node.keywords}
+    if any(has_pending(arg) for arg in [*args, *kwargs.values()]):
+        raise Unsupported("nested call")
     if node.func.id in functions and not kwargs:
         return PendingCall(node.func.id, args)
     if node.func.id in BUILTINS and None not in kwargs:
@@ -289,6 +297,8 @@ def main():
     parser.add_argument("--start", type=int, default=1, help="first printed number")
     parser.add_argument("--limit", type=int, default=100, help="maximum challenges to emit")
     args = parser.parse_args()
+    if not 1 <= args.start <= 100 or args.limit < 1:
+        parser.error("--start must be 1..100 and --limit at least 1")
     files = fetch(args.ref)
     challenges, skipped = build(files, args.ref)
     challenges = challenges[:min(args.limit, 101 - args.start)]

@@ -5,6 +5,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ num
   if (!/^\d{1,3}$/.test(number) || !['run', 'check', 'open', 'end'].includes(action)) {
     return NextResponse.json({ message: 'Not found' }, { status: 404 });
   }
+  if (Number(request.headers.get('content-length') ?? 0) > 64_000) {
+    return NextResponse.json({ message: 'Request too large' }, { status: 413 });
+  }
   try {
     const response = await fetch(`${process.env.API_URL ?? 'http://localhost:3001'}/challenges/${number}/${action}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: await request.text(), cache: 'no-store',

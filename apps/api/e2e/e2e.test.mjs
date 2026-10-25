@@ -11,6 +11,7 @@ import pg from 'pg';
 
 const api = process.env.API_URL ?? 'http://localhost:3001';
 const version = process.env.PISTON_PYTHON_VERSION ?? '3.12.0';
+if (process.env.E2E_DISPOSABLE_DB !== '1') throw new Error('Set E2E_DISPOSABLE_DB=1 to confirm DATABASE_URL points at a disposable database: these tests overwrite fixtures.');
 const db = new pg.Pool({ connectionString: process.env.DATABASE_URL ?? 'postgresql://treat_or_code:change-me@localhost:55432/treat_or_code' });
 const DOUBLE = 'print(int(input()) * 2)';
 const WRONG = 'print(0)';
@@ -143,4 +144,16 @@ test('export links learners across visits without raw usernames or source code',
   const mine = read('visit_outcomes.csv').split('\n').filter((l) => l.includes(first.visitId) || l.includes(second.visitId));
   assert.equal(mine.length, 2);
   assert.equal(new Set(mine.map((l) => l.split(',')[0])).size, 1, 'same learner_id across both visits');
+});
+
+test('a visit ID cannot be reused on a different challenge', async () => {
+  const first = await open(97, 'reuse');
+  assert.equal((await open(98, 'reuse', first.visitId)).status, 400);
+  assert.deepEqual(await events(first.visitId), ['challenge_opened']);
+});
+
+test('ending a solved visit is idempotent', async () => {
+  const visit = await open(99, 'solver');
+  assert.equal((await submit('check', 99, visit.visitId, 'solver', DOUBLE)).body.status, 'accepted');
+  assert.equal((await post('/challenges/99/end', { visitId: visit.visitId, learnerUsername: 'solver' })).status, 201);
 });
