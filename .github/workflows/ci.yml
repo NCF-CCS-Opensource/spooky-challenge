@@ -1,0 +1,41 @@
+name: CI
+
+# Runs only when app code changes, so docs-only commits stay green before #1 lands.
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", "api/**", "compose.yaml", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["web/**", "api/**", "compose.yaml", ".github/workflows/ci.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [web, api]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm test --if-present
+      - run: npm run build
+
+  # The booth runs on Docker Compose; a broken Dockerfile should fail here, not on event day.
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker compose build
