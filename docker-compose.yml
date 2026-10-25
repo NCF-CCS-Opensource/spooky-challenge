@@ -19,6 +19,7 @@ services:
       PORT: 3001
       DATABASE_URL: ${DATABASE_URL:-postgresql://treat_or_code:change-me@db:5432/treat_or_code}
       PISTON_URL: http://piston:2000
+      PISTON_PYTHON_VERSION: ${PISTON_PYTHON_VERSION:-3.12.0}
     depends_on:
       db: { condition: service_healthy }
       piston: { condition: service_healthy }
