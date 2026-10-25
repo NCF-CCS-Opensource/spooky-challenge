@@ -36,4 +36,4 @@ EXPORT_HMAC_KEY=<secret> python3 apps/api/scripts/export_bkt.py interactions.jso
 python3 -m unittest discover apps/api/scripts   # run the export tests
 ```
 
-The output folder holds the BKT rows, separate visit outcome labels, a manifest with schema version, a data dictionary and a report. Usernames are self-reported, so impersonation or collisions can merge learners.
+`interactions.jsonl` contains raw usernames: keep it out of git and delete it after exporting. The output folder holds the BKT rows, separate visit outcome labels, a manifest with schema version, a data dictionary and a report. Usernames are self-reported, so impersonation or collisions can merge learners.

@@ -47,7 +47,7 @@ def load(lines):
 
 def build(events, key):
     """Return (bkt_rows, visit_rows, quality) from time-ordered events."""
-    quality = {"duplicate_events": 0, "visits_with_multiple_skills": 0, "missing_attempt_order": 0, "missing_language": 0}
+    quality = {"duplicate_events": 0, "visits_with_multiple_skills": 0, "missing_attempt_order": 0, "missing_language": 0, "runner_unavailable_excluded": 0}
     seen = set()
     skills_by_visit = defaultdict(set)
     judged, visits = [], {}
@@ -63,6 +63,9 @@ def build(events, key):
         if e["event_type"] != "submission_result":
             continue
         attempt = (e.get("metadata") or {}).get("attempt_order")  # absent on event_version 1
+        if (e.get("metadata") or {}).get("error_category") == "runner_unavailable":
+            quality["runner_unavailable_excluded"] += 1  # infrastructure failure says nothing about the skill
+            continue
         quality["missing_attempt_order"] += attempt is None
         quality["missing_language"] += e.get("language") is None
         identity = (e["visit_id"], attempt) if attempt is not None else e["id"]
@@ -93,8 +96,8 @@ def report(bkt, visits, quality):
              f"- Sequences (learner x skill): {len({(r['learner_id'], r['skill_id']) for r in bkt})}",
              f"- Visit outcomes: {dict(Counter(v['outcome'] for v in visits))}", "",
              "## Per skill", "",
-             "| skill | learners | visits | opportunities | correct % | learners with repeats | BKT estimable |",
-             "| --- | --- | --- | --- | --- | --- | --- |"]
+             "| skill | learners | sequences | visits | opportunities | correct % | learners with repeats | BKT estimable |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     by_skill = defaultdict(list)
     for r in bkt:
         by_skill[r["skill_id"]].append(r)
@@ -105,7 +108,7 @@ def report(bkt, visits, quality):
         ok = len(per_learner) >= MIN_LEARNERS_PER_SKILL and repeaters >= MIN_REPEATERS_PER_SKILL
         if not ok:
             sparse.append(skill)
-        lines.append(f"| {skill} | {len(per_learner)} | {len({r['visit_id'] for r in rows})} | {len(rows)} | "
+        lines.append(f"| {skill} | {len(per_learner)} | {len(per_learner)} | {len({r['visit_id'] for r in rows})} | {len(rows)} | "
                      f"{100 * sum(r['correct'] for r in rows) / len(rows):.0f} | {repeaters} | {'yes' if ok else 'NO: too sparse'} |")
     if sparse:
         lines += ["", f"**Too sparse for reliable BKT parameter estimation** (needs >= {MIN_LEARNERS_PER_SKILL} learners and "
@@ -115,14 +118,16 @@ def report(bkt, visits, quality):
               f"- Judged events missing attempt_order (event_version 1): {quality['missing_attempt_order']}",
               f"- Judged events missing language: {quality['missing_language']}",
               f"- Visits spanning more than one skill (must be 0): {quality['visits_with_multiple_skills']}",
-              f"- Split: {dict(Counter(r['split'] for r in bkt))} opportunities by learner fold", "",
+              f"- Judged events excluded as runner_unavailable: {quality['runner_unavailable_excluded']}",
+              f"- Split opportunities: {dict(Counter(r['split'] for r in bkt))}; learners: "
+              f"{dict(Counter(s for _, s in {(r['learner_id'], r['split']) for r in bkt}))} (an empty `eval` fold means no held-out evaluation is possible)", "",
               "## Likely leakage", "",
               "- `visit_outcomes.csv` outcomes (solved/gave_up) are known only after a visit ends. Never use them, or counts "
               "derived from later rows, as features for a prediction made earlier in the visit.",
               "- `opportunity_order` counts across a learner's visits, so a row's own `correct` must not feed its own prediction; "
               "use only rows with a smaller `opportunity_order` as history.",
-              "- A solved challenge is closed globally, so the solving attempt is each challenge's last correct row; "
-              "correctness is imbalanced toward incorrect for that reason.",
+              "- A solved challenge is closed globally, so each challenge has at most one correct solving attempt; "
+              "compare the correct % column against that when judging class balance.",
               "- Usernames are self-reported: collisions or impersonation merge learners; linkage across visits is best-effort."]
     return "\n".join(lines) + "\n"
 
@@ -153,6 +158,10 @@ For future-response evaluation, predict an `eval` learner's row N using only tha
 | outcome | `solved`, `gave_up` (learner or booth organizer ended it), or `open` (no terminal event yet) |
 | difficulty, content_version | challenge context at the time of the visit |
 | other columns | as above |
+
+## Linkage caveat
+Learner linkage is by self-reported username. Collisions or impersonation merge different people into one learner_id.
+Judged attempts with error_category `runner_unavailable` are excluded (infrastructure, not skill evidence).
 
 ## Missing values
 Empty string means missing. Only `attempt_order` can be empty. Rows are never imputed. Duplicate judged events
