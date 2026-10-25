@@ -30,11 +30,84 @@ CREATE TABLE learning_interactions (
   visit_id uuid NOT NULL,
   learner_username text NOT NULL,
   challenge_id integer NOT NULL REFERENCES challenges(printed_number),
-  event_type text NOT NULL,
+  event_type text NOT NULL CHECK (event_type IN (
+    'challenge_opened', 'code_run', 'submission_result',
+    'hint_revealed', 'challenge_solved', 'gave_up'
+  )),
+  event_version integer NOT NULL DEFAULT 1 CHECK (event_version > 0),
+  content_version integer NOT NULL CHECK (content_version > 0),
+  language text,
+  assessed_skill_id text NOT NULL REFERENCES assessed_skills(id),
+  difficulty text NOT NULL CHECK (difficulty IN ('easy', 'medium', 'hard')),
   is_correct boolean,
-  created_at timestamptz NOT NULL DEFAULT now()
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (
+    (event_type IN ('submission_result', 'challenge_solved') AND is_correct IS NOT NULL)
+    OR (event_type NOT IN ('submission_result', 'challenge_solved') AND is_correct IS NULL)
+  ),
+  CHECK (event_type <> 'challenge_solved' OR is_correct),
+  CONSTRAINT learning_interactions_metadata_contract CHECK (
+    (event_type = 'hint_revealed' AND event_version = 1 AND metadata ? 'hint_index'
+      AND jsonb_typeof(metadata->'hint_index') = 'number'
+      AND metadata->>'hint_index' ~ '^[0-9]+$'
+      AND metadata - 'hint_index' = '{}'::jsonb)
+    OR (event_type = 'submission_result' AND event_version = 1 AND metadata = '{}'::jsonb)
+    OR (event_type = 'submission_result' AND event_version = 2
+      AND jsonb_typeof(metadata->'attempt_order') = 'number'
+      AND jsonb_typeof(metadata->'elapsed_ms') = 'number'
+      AND jsonb_typeof(metadata->'failed_test_count') = 'number'
+      AND jsonb_typeof(metadata->'error_category') = 'string'
+      AND metadata->>'attempt_order' ~ '^[1-9][0-9]*$'
+      AND metadata->>'elapsed_ms' ~ '^[0-9]+$'
+      AND metadata->>'failed_test_count' ~ '^[0-9]+$'
+      AND metadata->>'error_category' IN ('accepted', 'wrong_answer', 'syntax_error', 'runtime_error', 'time_limit_exceeded', 'runner_unavailable', 'output_limit_exceeded')
+      AND metadata - ARRAY['attempt_order', 'elapsed_ms', 'failed_test_count', 'error_category']::text[] = '{}'::jsonb)
+    OR (event_type NOT IN ('hint_revealed', 'submission_result') AND metadata = '{}'::jsonb)
+  )
 );
 
+CREATE TABLE code_executions (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  challenge_id integer NOT NULL REFERENCES challenges(printed_number),
+  language text NOT NULL CHECK (language = 'python'),
+  runtime_version text NOT NULL,
+  duration_ms integer NOT NULL CHECK (duration_ms >= 0),
+  exit_status integer,
+  error_category text CHECK (error_category IN (
+    'syntax_error', 'runtime_error', 'time_limit_exceeded', 'runner_unavailable',
+    'output_limit_exceeded', 'accepted', 'wrong_answer'
+  )),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE UNIQUE INDEX one_terminal_event_per_visit ON learning_interactions (visit_id)
+  WHERE event_type IN ('challenge_solved', 'gave_up');
+CREATE UNIQUE INDEX one_reveal_per_hint_per_visit
+  ON learning_interactions (visit_id, (metadata->>'hint_index'))
+  WHERE event_type = 'hint_revealed';
 CREATE UNIQUE INDEX one_solve_per_challenge ON learning_interactions (challenge_id)
   WHERE event_type = 'challenge_solved';
+CREATE INDEX interactions_by_visit_event ON learning_interactions (visit_id, event_type);
 CREATE INDEX interactions_by_learner ON learning_interactions (learner_username, created_at, id);
+
+CREATE FUNCTION set_learning_interaction_timestamp() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.created_at := clock_timestamp();
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER learning_interactions_server_timestamp
+  BEFORE INSERT ON learning_interactions
+  FOR EACH ROW EXECUTE FUNCTION set_learning_interaction_timestamp();
+
+CREATE FUNCTION reject_learning_interaction_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'learning_interactions is append-only';
+END;
+$$;
+
+CREATE TRIGGER learning_interactions_append_only
+  BEFORE UPDATE OR DELETE ON learning_interactions
+  FOR EACH ROW EXECUTE FUNCTION reject_learning_interaction_mutation();

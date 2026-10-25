@@ -1,12 +1,8 @@
-export default async function ChallengePage({ searchParams }: { searchParams: Promise<{ number?: string }> }) {
-  const { number } = await searchParams;
-  const parsed = Number(number);
-  const valid = Number.isInteger(parsed) && parsed >= 1 && parsed <= 100;
+import ChallengePage from './challenge-page';
+import { redirect } from 'next/navigation';
 
-  return <main>
-    <p className="eyebrow">TREAT OR CODE · CHALLENGE</p>
-    <h1>{valid ? `Challenge ${parsed}` : 'Check your slip number'}</h1>
-    <p>{valid ? 'Challenge content is being prepared.' : 'Enter a number from 1 to 100.'}</p>
-    <a href="/">Back to the board</a>
-  </main>;
+export default async function LegacyChallengePage({ searchParams }: Readonly<{ searchParams: Promise<{ number?: string }> }>) {
+  const { number = '' } = await searchParams;
+  if (number) redirect(`/challenge/${encodeURIComponent(number)}`);
+  return <ChallengePage number="" />;
 }
