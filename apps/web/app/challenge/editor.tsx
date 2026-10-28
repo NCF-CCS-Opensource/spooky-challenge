@@ -14,6 +14,7 @@ function validUsername(value: string) { return value.length >= 1 && value.length
 
 export default function Editor({ number, pythonVersion, starterCode, examples, hints }: Readonly<{ number: number; pythonVersion: string; starterCode: string; examples: Array<{ input?: string }>; hints: string[] }>) {
   const starting = useRef(false);
+  const dialog = useRef<HTMLDialogElement>(null);
   const [revealed, setRevealed] = useState(0);
   const [code, setCode] = useState(starterCode);
   const [stdin, setStdin] = useState(examples[0]?.input ?? '');
@@ -40,11 +41,15 @@ export default function Editor({ number, pythonVersion, starterCode, examples, h
     }
   }, [number]);
 
+  useEffect(() => {
+    if (mode === 'username' || mode === 'conflict') dialog.current?.showModal();
+  }, [mode]);
+
   async function startVisit() {
     if (starting.current) return;
     starting.current = true;
     const normalized = normalizeUsername(username);
-    if (!validUsername(normalized)) { setError('Use 1–40 letters, numbers, spaces, hyphens, or underscores. Control characters are not allowed.'); return; }
+    if (!validUsername(normalized)) { starting.current = false; setError('Use 1–40 letters, numbers, spaces, hyphens, or underscores. Control characters are not allowed.'); return; }
     setBusy(true); setError('');
     const newVisit = { visitId: crypto.randomUUID(), learnerUsername: normalized, number };
     try {
@@ -127,39 +132,54 @@ export default function Editor({ number, pythonVersion, starterCode, examples, h
 
   return <>
     <section className="workbench" aria-label="Python code editor" aria-busy={mode === 'loading' || busy}>
-      <div className="editor-heading"><strong>Your code</strong><span>Python {pythonVersion}</span></div>
-      <CodeMirror value={code} height="340px" extensions={[python()]} onChange={setCode} aria-label="Python source code" />
-      <label htmlFor="stdin">Standard input</label>
-      <textarea id="stdin" className="stdin" value={stdin} onChange={(event) => setStdin(event.target.value)} rows={3} maxLength={8000} />
+      <div className="panel-heading"><strong>Your code</strong><span className="panel-meta">Python {pythonVersion}</span></div>
+      <div className="editor-file"><span>solution.py</span><span>Python</span></div>
+      <CodeMirror value={code} height="100%" theme="dark" extensions={[python()]} onChange={setCode} aria-label="Python source code" />
       <div className="editor-actions">
-        <button type="button" onClick={() => submit('run')} disabled={busy || mode !== 'active'}>{busy ? 'Running…' : 'Run Code'}</button>
-        <button type="button" onClick={() => submit('check')} disabled={busy || mode !== 'active'}>Check Solution</button>
         {mode === 'active' && <button type="button" className="end-button" onClick={() => endVisit(visit)} disabled={busy}>End challenge</button>}
+        <div className="run-actions">
+          <button type="button" className="secondary-button" onClick={() => submit('run')} disabled={busy || mode !== 'active'}>{busy ? 'Running…' : 'Run Code'}</button>
+          <button type="button" onClick={() => submit('check')} disabled={busy || mode !== 'active'}>Check Solution</button>
+        </div>
       </div>
-      {hints.slice(0, revealed).map((hint, index) => <p key={`${index}-${hint}`} className="hint"><strong>Hint {index + 1}:</strong> {hint}</p>)}
-      {mode === 'active' && revealed < hints.length && <button type="button" onClick={revealHint} disabled={busy}>Show hint {revealed + 1} of {hints.length}</button>}
-      {mode === 'ended' && result?.status !== 'accepted' && <output className="visit-status">This visit has ended. Open the challenge again to start a new visit.</output>}
-      {error && <p role="alert">{error}</p>}
-      {result && <section className="result" aria-live="polite">
-        <h2>{resultHeading(result)}</h2>
-        {result.status === 'accepted' && <p>You’re eligible to receive candy from an organizer.</p>}
-        {result.status && ['accepted', 'wrong_answer'].includes(result.status) ? <p>{result.passed} of {result.total} tests passed.</p> : null}
-        {result.output !== undefined && <pre>{result.output || '(no output)'}</pre>}
-      </section>}
+      <section className="console" aria-labelledby="console-title">
+        <div className="panel-heading"><h2 id="console-title">Test your code</h2><span className="panel-meta">Input &amp; results</span></div>
+        <div className="console-content">
+          <div className="input-panel"><label htmlFor="stdin">Standard input</label>
+            <textarea id="stdin" className="stdin" value={stdin} onChange={(event) => setStdin(event.target.value)} rows={3} maxLength={8000} />
+          </div>
+          <section className={`result${result?.status === 'accepted' ? ' result-success' : result?.error || result?.status === 'wrong_answer' ? ' result-error' : ''}`} aria-live="polite" aria-atomic="true">
+            <h3>{busy ? 'Working…' : result ? resultHeading(result) : 'Ready when you are'}</h3>
+            {!busy && !result && <p>Run your code to see its output here.</p>}
+            {result?.status === 'accepted' && <p>You’re eligible to receive candy from an organizer.</p>}
+            {result?.status && ['accepted', 'wrong_answer'].includes(result.status) ? <p>{result.passed} of {result.total} tests passed.</p> : null}
+            {result?.output !== undefined && <pre>{result.output || '(no output)'}</pre>}
+          </section>
+        </div>
+      </section>
+      {(hints.length > 0 || error || mode === 'ended') && <div className="editor-feedback">
+        {hints.slice(0, revealed).map((hint, index) => <p key={`${index}-${hint}`} className="hint"><strong>Hint {index + 1}:</strong> {hint}</p>)}
+        {mode === 'active' && revealed < hints.length && <button type="button" className="secondary-button hint-button" onClick={revealHint} disabled={busy}>Show hint {revealed + 1} of {hints.length}</button>}
+        {mode === 'ended' && result?.status !== 'accepted' && <output className="visit-status">This visit has ended. Open the challenge again to start a new visit.</output>}
+        {mode === 'ended' && <a href="/">Back to the board</a>}
+        {error && <p role="alert">{error}</p>}
+      </div>}
     </section>
-    {mode === 'username' && <div className="modal-backdrop"><dialog open className="visit-modal" aria-modal="true" aria-labelledby="username-title">
-      <h2 id="username-title">Choose a pseudonym</h2>
-      <p>Choose a unique pseudonym. Do not enter your real name or email.</p>
-      <label htmlFor="pseudonym">Your pseudonym</label>
-      <input id="pseudonym" className="pseudonym" value={username} onChange={(event) => setUsername(event.target.value)} maxLength={80} autoComplete="off" autoFocus />
-      {error && <p role="alert">{error}</p>}
-      <button type="button" onClick={startVisit} disabled={busy}>{busy ? 'Opening…' : 'Start challenge'}</button>
-    </dialog></div>}
-    {mode === 'conflict' && <div className="modal-backdrop"><dialog open className="visit-modal" aria-modal="true" aria-labelledby="active-title">
+    {mode === 'username' && <dialog ref={dialog} className="visit-modal" onCancel={(event) => event.preventDefault()} aria-labelledby="username-title">
+      <form onSubmit={(event) => { event.preventDefault(); void startVisit(); }}>
+        <h2 id="username-title">Choose a pseudonym</h2>
+        <p>Choose a unique pseudonym. Do not enter your real name or email.</p>
+        <label htmlFor="pseudonym">Your pseudonym</label>
+        <input id="pseudonym" className="pseudonym" value={username} onChange={(event) => setUsername(event.target.value)} maxLength={80} autoComplete="off" autoFocus />
+        {error && <p role="alert">{error}</p>}
+        <button type="submit" disabled={busy}>{busy ? 'Opening…' : 'Start challenge'}</button>
+      </form>
+    </dialog>}
+    {mode === 'conflict' && <dialog ref={dialog} className="visit-modal" onCancel={(event) => event.preventDefault()} aria-labelledby="active-title">
       <h2 id="active-title">A challenge visit is active</h2>
       <p>End challenge {visit?.number} before opening this challenge.</p>
       {error && <p role="alert">{error}</p>}
       <button type="button" onClick={() => endVisit(visit)} disabled={busy}>{busy ? 'Ending…' : 'End current visit and continue'}</button>
-    </dialog></div>}
+    </dialog>}
   </>;
 }
